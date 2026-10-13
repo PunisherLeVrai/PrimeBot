@@ -1081,8 +1081,13 @@ async function runAvertissementForGuild(
   }
 
   const today = dateKey();
+  const discipline = require("../core/disciplineStore");
+  if (discipline.getProcessedDate(guild.id, config._dispoId || "principal") === today) {
+    return { ok: true, skipped: true, reason: "already_processed_today" };
+  }
 
   if (
+    !config?._dispoId &&
     config?.automations?.avertissement?.lastProcessedDate ===
     today
   ) {
@@ -1130,6 +1135,7 @@ async function runAvertissementForGuild(
     warningRoleIds.map(() => []);
 
   const regularizedIds = [];
+  const alreadyProcessedIds = [];
   const maxLevelIds = [];
   const unchangedIds = [];
   const failedIds = [];
@@ -1152,19 +1158,10 @@ async function runAvertissementForGuild(
 
     try {
       if (hasReacted) {
-        if (currentIndexes.length) {
-          await member.roles.remove(
-            currentIndexes.map(
-              (index) =>
-                warningRoleIds[index]
-            ),
-            `PRIME — disponibilité renseignée (${result.dayLabel})`
-          );
-
-          regularizedIds.push(member.id);
-        } else {
-          unchangedIds.push(member.id);
-        }
+        // Un joueur qui répond conserve ses avertissements précédents.
+        unchangedIds.push(member.id);
+      } else if (discipline.wasPlayerProcessed(guild.id, member.id, today)) {
+        alreadyProcessedIds.push(member.id);
       } else {
         const currentLevel =
           currentIndexes.length
@@ -1200,6 +1197,7 @@ async function runAvertissementForGuild(
           }
 
           maxLevelIds.push(member.id);
+          discipline.markPlayerProcessed(guild.id, member.id, today, config._dispoId || "principal");
         } else {
           if (currentIndexes.length) {
             await member.roles.remove(
@@ -1219,6 +1217,12 @@ async function runAvertissementForGuild(
           levelAddedIds[targetLevel].push(
             member.id
           );
+          discipline.recordWarning(guild.id, member.id, targetLevel + 1, {
+            source: "automation",
+            availabilityId: config._dispoId || "principal",
+            date: today,
+          });
+          discipline.markPlayerProcessed(guild.id, member.id, today, config._dispoId || "principal");
         }
       }
     } catch {
@@ -1229,6 +1233,8 @@ async function runAvertissementForGuild(
       await sleep(throttleMs);
     }
   }
+
+  discipline.setProcessedDate(guild.id, today, config._dispoId || "principal");
 
   const {
     getGuildConfig,
@@ -1325,7 +1331,7 @@ async function runAvertissementForGuild(
       .addFields(
         {
           name:
-            `Régularisés — rôles retirés (` +
+            `Réponses enregistrées — avertissements conservés (` +
             `${regularizedIds.length})`,
 
           value: mentionList(
@@ -1346,6 +1352,7 @@ async function runAvertissementForGuild(
 
           value:
             `Inchangés : **${unchangedIds.length}**\n` +
+            `Déjà traités dans une autre équipe : **${alreadyProcessedIds.length}**\n` +
             `Échecs : **${failedIds.length}**` +
             (failedIds.length
               ? `\n${mentionList(
@@ -1447,6 +1454,8 @@ function startAutomationRunner(
       : 20_000;
 
   const lastRun = new Map();
+  const lastIntegrity = new Map();
+  let lastOrphanScan = null;
 
   async function tick() {
     try {
@@ -1459,9 +1468,33 @@ function startAutomationRunner(
         getGuildConfig,
       } = require("../core/guildConfig");
 
+      // Audit hebdomadaire non destructif des anciennes configurations.
+      const weeklyKey = `${now.getFullYear()}-${Math.floor((now - new Date(now.getFullYear(), 0, 1)) / 604800000)}`;
+      if (now.getDay() === 1 && now.getHours() === 9 && now.getMinutes() === 5 && lastOrphanScan !== weeklyKey) {
+        lastOrphanScan = weeklyKey;
+        const { orphanedGuildIds } = require("../core/integrityMonitor");
+        const orphaned = orphanedGuildIds(client);
+        if (orphaned.length) {
+          console.warn("[PRIME][ORPHAN_AUDIT] Configurations orphelines (aucune suppression) :", orphaned.join(", "));
+          // Ne pas DM arbitrairement un administrateur : le propriétaire du bot
+          // peut consulter le journal Railway et utiliser /cleanup_servers scan.
+        }
+      }
+
       for (const guild of client.guilds.cache.values()) {
         const config =
           getGuildConfig(guild.id);
+
+        // Contrôle d'intégrité quotidien, même si les automations de présence sont coupées.
+        if (now.getHours() === 9 && now.getMinutes() === 0 && lastIntegrity.get(guild.id) !== dateKey(now)) {
+          lastIntegrity.set(guild.id, dateKey(now));
+          const { inspectGuild } = require("../core/integrityMonitor");
+          const anomalies = await inspectGuild(guild, config || {}).catch(error => [String(error.message)]);
+          if (anomalies.length && config?.staffReportsChannelId) {
+            const report = await guild.channels.fetch(config.staffReportsChannelId).catch(() => null);
+            if (report?.isTextBased?.()) await report.send({ content: `**PRIME — anomalies de configuration**\n${anomalies.slice(0, 35).map(x => `• ${x}`).join("\n")}`.slice(0, 1900), allowedMentions: { parse: [] } }).catch(() => {});
+          }
+        }
 
         if (!config?.automations?.enabled) {
           continue;
@@ -1535,6 +1568,7 @@ function startAutomationRunner(
                   enabled: false,
                   times: [],
                 },
+              derniereChance: dispo.automations?.derniereChance || { enabled: false, minutesBefore: 30 },
               avertissement:
                 dispo.automations?.avertissement || {
                   enabled: false,
@@ -1544,6 +1578,22 @@ function startAutomationRunner(
                 },
             },
           };
+
+          // Rappel « dernière chance » avant le dernier CheckDispo.
+          const lastCheck = [...(dispoConfig.automations.checkDispo?.times || [])].sort().at(-1);
+          const lastCheckTime = parseHHMM(lastCheck);
+          const chance = dispoConfig.automations.derniereChance || {};
+          if (chance.enabled && lastCheckTime) {
+            const minutesBefore = Math.max(5, Math.min(180, Number(chance.minutesBefore) || 30));
+            const targetMinute = (lastCheckTime.hours * 60 + lastCheckTime.minutes - minutesBefore + 1440) % 1440;
+            if (now.getHours() * 60 + now.getMinutes() === targetMinute) {
+              const key = `${guild.id}:${dispo.id}:lastChance`;
+              if (lastRun.get(key) !== keyNow) {
+                lastRun.set(key, keyNow);
+                await runRappelDispoForGuild(guild, dispoConfig);
+              }
+            }
+          }
 
           for (const [
             name,
@@ -1594,6 +1644,12 @@ function startAutomationRunner(
                   guild,
                   dispoConfig
                 );
+                if (name === "check") {
+                  const sorted = [...(dispoConfig.automations.checkDispo.times || [])].sort();
+                  if (time === sorted.at(-1)) {
+                    await archiveAvailability(guild, dispoConfig);
+                  }
+                }
               }
             }
           }
@@ -1675,6 +1731,23 @@ function startAutomationRunner(
     clearInterval(timer);
 }
 
+async function archiveAvailability(guild, config) {
+  const result = await getPlayersAndReactions(guild, config);
+  if (!result.ok) return result;
+  const history = require("../core/dispoHistory");
+  const yes = [...(result.yesIds || result.presentIds || [])];
+  const no = [...(result.noIds || result.absentIds || [])];
+  const reacted = [...result.reactedIds];
+  const players = [...result.players.keys()];
+  return history.archive(guild.id, config._dispoId || "principal", dateKey(), {
+    players,
+    yes,
+    no,
+    reacted,
+    missing: players.filter(id => !result.reactedIds.has(id)),
+  });
+}
+
 module.exports = {
   startAutomationRunner,
 
@@ -1685,4 +1758,5 @@ module.exports = {
   runAvertissementForGuild,
 
   ensurePseudoChannelListener,
+  archiveAvailability,
 };
