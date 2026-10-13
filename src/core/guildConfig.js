@@ -50,6 +50,8 @@ const DEFAULT_GUILD = {
       times: [],
     },
 
+    derniereChance: { enabled: false, minutesBefore: 30 },
+
     avertissement: {
       enabled: false,
       roleIds: [null, null, null],
@@ -292,6 +294,11 @@ function normalizeAutomations(input) {
       times: rappelTimes,
     },
 
+    derniereChance: {
+      enabled: toBool(source.derniereChance?.enabled, false),
+      minutesBefore: clampInt(source.derniereChance?.minutesBefore, { min: 5, max: 180, fallback: 30 }),
+    },
+
     avertissement: {
       enabled: toBool(warning.enabled, false),
       roleIds,
@@ -345,6 +352,7 @@ function normalizeDisponibilite(input, fallbackId = "principal") {
     checkDispo: source.automations?.checkDispo,
     rappel: source.automations?.rappel,
     avertissement: source.automations?.avertissement,
+    derniereChance: source.automations?.derniereChance,
   });
 
   return {
@@ -382,6 +390,7 @@ function normalizeDisponibilite(input, fallbackId = "principal") {
       checkDispo: automations.checkDispo,
       rappel: automations.rappel,
       avertissement: automations.avertissement,
+      derniereChance: automations.derniereChance,
     },
   };
 }
@@ -546,6 +555,11 @@ function upsertGuildConfig(guildId, patch) {
     rappel: {
       ...(current.automations.rappel || {}),
       ...(source.automations?.rappel || {}),
+    },
+
+    derniereChance: {
+      ...(current.automations.derniereChance || {}),
+      ...(source.automations?.derniereChance || {}),
     },
 
     avertissement: {
