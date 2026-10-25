@@ -1,3 +1,4 @@
+const { requireStaffChannel } = require("../core/staffVisibility");
 const { SlashCommandBuilder, MessageFlags } = require("discord.js");
 const { authorized, reject } = require("../core/staffTools");
 const { snapshot } = require("../core/rosterService");
@@ -9,7 +10,8 @@ module.exports = {
     .addUserOption(o => o.setName("joueur").setDescription("Joueur concerné").setRequired(true)),
   async execute(interaction) {
     if (!authorized(interaction)) return reject(interaction);
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!await requireStaffChannel(interaction)) return;
+    await interaction.deferReply();
     try {
       const user = interaction.options.getUser("joueur");
       const data = await snapshot(interaction.guild);
