@@ -1,3 +1,4 @@
+const { requireStaffChannel } = require("../core/staffVisibility");
 const { SlashCommandBuilder, MessageFlags } = require("discord.js");
 const { authorized, reject, teams } = require("../core/staffTools");
 const { embed, safe } = require("../core/primeTheme");
@@ -5,7 +6,8 @@ module.exports = {
   data: new SlashCommandBuilder().setName("health").setDescription("État de santé des services PRIME"),
   async execute(interaction) {
     if (!authorized(interaction)) return reject(interaction);
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!await requireStaffChannel(interaction)) return;
+    await interaction.deferReply();
     try {
       const me = interaction.guild.members.me || await interaction.guild.members.fetchMe();
       const lines = [];
