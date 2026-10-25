@@ -1,3 +1,4 @@
+const { requireStaffChannel } = require("../core/staffVisibility");
 const { embed } = require("../core/primeTheme");
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 const { authorized, reject, team, teams } = require("../core/staffTools");
@@ -13,7 +14,8 @@ module.exports = {
       const lines=Object.entries(history).map(([name,days])=>{
         const d=days[today];return `${name} : ${d ? `Présents ${d.yes.length}, absents ${d.no.length}, sans réponse ${d.missing.length}` : "Pas encore archivé"}`;
       });
-      return interaction.reply({embeds: [embed("DISPONIBILITÉS  |  Synthèse quotidienne", `**Date :** ${today}\n\n${lines.join("\n") || "Aucune donnée archivée."}`)], flags: MessageFlags.Ephemeral});
+      if (!await requireStaffChannel(interaction)) return;
+      return interaction.reply({embeds: [embed("DISPONIBILITÉS  |  Synthèse quotidienne", `**Date :** ${today}\n\n${lines.join("\n") || "Aucune donnée archivée."}`)]});
     } catch (error) {
       console.error("[PRIME][DISPO_RESUME]", error);
       const payload = { content: "Erreur pendant l'exécution.", flags: MessageFlags.Ephemeral };
