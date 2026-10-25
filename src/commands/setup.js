@@ -18,6 +18,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   MessageFlags,
+  PermissionsBitField,
 } = require("discord.js");
 
 const {
@@ -280,7 +281,7 @@ function buildEmbed(guild, draft, page, dirty) {
           ? "✅ Configuration minimale complète"
           : "⚠️ Configuration incomplète"
       }\n` +
-        `Page : **${page}**${
+        `Page : **${page}**${page === "Rapport" ? `\n**Rapport :** ${draft.automations.rapportEffectif.enabled ? "ACTIF" : "INACTIF"} · Jour ${draft.automations.rapportEffectif.day} · ${draft.automations.rapportEffectif.time} · <#${draft.automations.rapportEffectif.channelId || draft.staffReportsChannelId || "0"}>` : ""}${
           dirty
             ? "\n⚠️ Modifications non sauvegardées"
             : ""
@@ -585,6 +586,12 @@ module.exports.execute =
       });
     }
 
+    // Le setup est visible pour la formation dans un salon réservé au staff.
+    const privateStaffChannel = !interaction.channel.permissionsFor(interaction.guild.roles.everyone)?.has(PermissionsBitField.Flags.ViewChannel);
+    if (!privateStaffChannel) {
+      return interaction.reply({ content: "Utilise /setup dans un salon privé réservé au staff pour partager la formation en sécurité.", flags: MessageFlags.Ephemeral });
+    }
+
     const savedWarning =
       saved.automations?.avertissement || {};
 
@@ -629,6 +636,7 @@ module.exports.execute =
         ),
 
       automations: {
+        rapportEffectif: { enabled: Boolean(saved.automations?.rapportEffectif?.enabled), day: saved.automations?.rapportEffectif?.day ?? 0, time: saved.automations?.rapportEffectif?.time || "20:00", channelId: saved.automations?.rapportEffectif?.channelId || saved.staffReportsChannelId || null, lastSentKey: saved.automations?.rapportEffectif?.lastSentKey || null },
         enabled:
           Boolean(saved.automations?.enabled),
 
@@ -725,6 +733,9 @@ module.exports.execute =
       idsAModal: "modal:idsA",
       idsBModal: "modal:idsB",
 
+      reportToggle: "btn:reportToggle",
+      reportSettings: "btn:reportSettings",
+      reportModal: "modal:reportSettings",
       autoTab: "auto:tab",
       autoGlobal: "btn:autoGlobal",
       autoPseudo: "btn:autoPseudo",
@@ -792,12 +803,21 @@ module.exports.execute =
                 value: "Automations",
                 default:
                   page === "Automations",
-              }
+              },
+              { label: "Rapport hebdomadaire", value: "Rapport", default: page === "Rapport" }
             )
         ),
       ];
 
-      if (page === "Salons") {
+      if (page === "Rapport") {
+        rows.push(new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(CID.reportToggle)
+            .setLabel(draft.automations.rapportEffectif.enabled ? "Désactiver le rapport" : "Activer le rapport")
+            .setStyle(draft.automations.rapportEffectif.enabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(CID.reportSettings)
+            .setLabel("Jour, heure et salon").setStyle(ButtonStyle.Primary)
+        ));
+      } else if (page === "Salons") {
         rows.push(
           new ActionRowBuilder().addComponents(
             new ChannelSelectMenuBuilder()
@@ -1220,6 +1240,18 @@ module.exports.execute =
 
     async function handle(i) {
       if (i.isModalSubmit?.()) {
+        if (i.customId === CID.reportModal) {
+          const day = Number(i.fields.getTextInputValue("day"));
+          const time = normalizeTime(i.fields.getTextInputValue("time"));
+          const channelId = i.fields.getTextInputValue("channel").trim().replace(/[<#>]/g, "");
+          if (!Number.isInteger(day) || day < 0 || day > 6 || !time || !isSnowflake(channelId)) {
+            return i.reply({ content: "Paramètres invalides : jour 0 (lundi) à 6 (dimanche), heure HH:MM et ID de salon.", flags: MessageFlags.Ephemeral });
+          }
+          draft.automations.rapportEffectif = { ...draft.automations.rapportEffectif, day, time, channelId };
+          dirty = true;
+          await i.reply({ content: "Paramètres du rapport mis à jour. Pense à sauvegarder le setup.", flags: MessageFlags.Ephemeral });
+          return refresh();
+        }
         if (
           i.customId === CID.minuteModal
         ) {
@@ -1420,6 +1452,7 @@ module.exports.execute =
                 enabled:
                   draft.automations.enabled,
 
+                rapportEffectif: draft.automations.rapportEffectif,
                 pseudo:
                   draft.automations.pseudo,
 
@@ -1606,6 +1639,25 @@ module.exports.execute =
         );
       }
 
+      if (i.customId === CID.reportToggle) {
+        draft.automations.rapportEffectif.enabled = !draft.automations.rapportEffectif.enabled;
+        dirty = true;
+        return refresh();
+      }
+      if (i.customId === CID.reportSettings) {
+        const r = draft.automations.rapportEffectif;
+        const fields = [
+          ["day", "Jour : 0 lundi à 6 dimanche", String(r.day)],
+          ["time", "Heure locale (HH:MM)", r.time],
+          ["channel", "ID du salon staff", r.channelId || draft.staffReportsChannelId || ""],
+        ];
+        return i.showModal(new ModalBuilder().setCustomId(CID.reportModal)
+          .setTitle("Rapport hebdomadaire PRIME")
+          .addComponents(...fields.map(([id, label, value]) => new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(TextInputStyle.Short)
+              .setRequired(true).setValue(value)
+          ))));
+      }
       if (
         i.customId === CID.minuteButton
       ) {
@@ -1779,6 +1831,7 @@ module.exports.execute =
             postRoleIds: [],
 
             automations: {
+              rapportEffectif: { enabled: false, day: 0, time: "20:00", channelId: null, lastSentKey: null },
               enabled: false,
 
               pseudo: {
@@ -1826,9 +1879,6 @@ module.exports.execute =
       ],
 
       components: pageRows(),
-
-      flags:
-        MessageFlags.Ephemeral,
     });
 
     SESSIONS.set(
