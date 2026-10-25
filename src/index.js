@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { startAutomationRunner } = require("./automations/runner");
+const { startWeeklyRoster } = require("./core/weeklyRoster");
 const { ensureGlobalSetupListener } = require("./commands/setup");
 
 const TOKEN = process.env.TOKEN;
@@ -85,6 +86,7 @@ client.once(Events.ClientReady, () => {
   }
 
   try {
+    startWeeklyRoster(client);
     startAutomationRunner(client, {
       loopMs: 20_000,
       scanLimit: 300,
