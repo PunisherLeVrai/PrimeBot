@@ -11,6 +11,7 @@ const { log } = require("../core/primeAudit");
 const { teams } = require("../core/staffTools");
 const { PermissionsBitField } = require("discord.js");
 const { getUserPseudos } = require("../core/pseudoStore");
+const { DAYS, systems, getSystem, missingPlayers, sendReminder } = require("../core/primeReminder");
 
 function menu(view, page, playerId, nonce) {
   const id = (action) => `prime3:${nonce}:${action}`;
@@ -28,6 +29,7 @@ function menu(view, page, playerId, nonce) {
   const report = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(id("weeklyReport")).setLabel("Publier rapport hebdo").setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(id("refresh")).setLabel("Actualiser").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(id("reminder")).setLabel("Rappel disponibilités").setStyle(ButtonStyle.Primary),
   );
   return [nav, actions, report];
 }
@@ -112,6 +114,57 @@ module.exports = {
       }
       const action = button.customId.split(":")[2];
       try {
+        if (action === "reminder") {
+          const options = systems(interaction.guildId).slice(0, 25).map((s, i) => ({
+            label: (i === 0 ? "Par défaut · " : "") + (s.nom || s.id),
+            value: String(s.id),
+          }));
+          const selection = await button.reply({
+            content: "**PRIME · Assistant de rappel**\nChoisis une équipe. Seuls les joueurs sans réaction ✅ ou ❌ seront concernés.",
+            components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
+              .setCustomId(`primeReminder:${nonce}:system`).setPlaceholder("Équipe par défaut ou autre équipe").addOptions(options))],
+            flags: MessageFlags.Ephemeral, fetchReply: true,
+          });
+          try {
+            const choose = await selection.awaitMessageComponent({
+              filter: i => i.user.id === button.user.id && i.customId === `primeReminder:${nonce}:system`, time: 60000,
+            });
+            const systemId = choose.values[0];
+            const system = getSystem(interaction.guildId, systemId);
+            const dayOptions = DAYS.map((name, index) => ({ label: name, value: String(index) }));
+            await choose.update({ content: `**Équipe : ${system.nom || system.id}**\nChoisis le jour à contrôler.`,
+              components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
+                .setCustomId(`primeReminder:${nonce}:day`).setPlaceholder("Jour du rappel").addOptions(dayOptions))] });
+            const chooseDay = await selection.awaitMessageComponent({
+              filter: i => i.user.id === button.user.id && i.customId === `primeReminder:${nonce}:day`, time: 60000,
+            });
+            await chooseDay.deferUpdate();
+            const day = Number(chooseDay.values[0]);
+            const result = await missingPlayers(interaction.guild, system, day);
+            const preview = result.players.slice(0, 25).map(m => `<@${m.id}>`).join(" ") || "Aucun joueur à relancer.";
+            const confirmId = `primeReminder:${nonce}:confirm`;
+            await chooseDay.editReply({
+              content: `**PRIME · Aperçu du rappel**\n**Équipe :** ${system.nom || system.id}\n**Jour :** ${DAYS[day]}\n**Sans réponse :** ${result.players.length}/${result.total}\n**Destination :** <#${result.channel.id}>\n${preview}${result.players.length > 25 ? `\n… et ${result.players.length - 25} autres` : ""}\n\nAucun envoi avant confirmation.`,
+              components: [new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(confirmId).setLabel("Confirmer l'envoi").setStyle(ButtonStyle.Danger).setDisabled(!result.players.length),
+                new ButtonBuilder().setCustomId(`primeReminder:${nonce}:cancel`).setLabel("Annuler").setStyle(ButtonStyle.Secondary))],
+              allowedMentions: { parse: [] },
+            });
+            const decision = await selection.awaitMessageComponent({
+              filter: i => i.user.id === button.user.id && [confirmId, `primeReminder:${nonce}:cancel`].includes(i.customId), time: 60000,
+            });
+            if (decision.customId.endsWith(':cancel')) return decision.update({ content: "Rappel annulé.", components: [] });
+            await decision.deferUpdate();
+            // Recontrôle au moment de l'envoi : une réponse récente exclut le joueur.
+            const fresh = await missingPlayers(interaction.guild, system, day);
+            const sent = await sendReminder(fresh, system, day, button.user.id);
+            log(interaction.guildId, button.user.id, "reminder.send", system.id, { day, count: sent.count });
+            return decision.editReply({ content: sent.count ? `Rappel envoyé dans <#${sent.channelId}> à ${sent.count} joueur(s).` : "Plus aucun joueur sans réponse : aucun rappel envoyé.", components: [] });
+          } catch (error) {
+            console.error('[PRIME][RAPPEL]', error);
+            return button.editReply({ content: `Rappel non envoyé : ${error.message === 'Collector received no interactions before ending with reason: time' ? 'délai dépassé' : error.message}`, components: [] }).catch(() => {});
+          }
+        }
         if (action === "weeklyReport") {
           const { getGuildConfig } = require("../core/guildConfig");
           const { reportForGuild } = require("../core/weeklyRoster");
