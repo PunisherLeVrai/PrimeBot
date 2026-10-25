@@ -9,6 +9,7 @@ const { embed, safe, pages } = require("../core/primeTheme");
 const { getPlayer, recordWarning } = require("../core/disciplineStore");
 const { log } = require("../core/primeAudit");
 const { teams } = require("../core/staffTools");
+const { PermissionsBitField } = require("discord.js");
 const { getUserPseudos } = require("../core/pseudoStore");
 
 function menu(view, page, playerId, nonce) {
@@ -24,7 +25,11 @@ function menu(view, page, playerId, nonce) {
     new ButtonBuilder().setCustomId(id("profile")).setLabel("Fiche joueur").setStyle(ButtonStyle.Success).setDisabled(!playerId),
     new ButtonBuilder().setCustomId(id("discipline")).setLabel("Discipline").setStyle(ButtonStyle.Danger).setDisabled(!playerId),
   );
-  return [nav, actions];
+  const report = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(id("weeklyReport")).setLabel("Publier rapport hebdo").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(id("refresh")).setLabel("Actualiser").setStyle(ButtonStyle.Secondary),
+  );
+  return [nav, actions, report];
 }
 
 function viewPayload(state, nonce) {
@@ -90,18 +95,38 @@ module.exports = {
   data: new SlashCommandBuilder().setName("prime").setDescription("Ouvrir le centre de gestion PRIME"),
   async execute(interaction) {
     if (!authorized(interaction)) return reject(interaction);
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    // Refuser la publication dans un salon visible par les joueurs.
+    const everyone = interaction.guild.roles.everyone;
+    if (interaction.channel.permissionsFor(everyone)?.has(PermissionsBitField.Flags.ViewChannel)) {
+      return interaction.reply({ content: "Pour partager le dashboard, lance /prime dans un salon privé réservé au staff.", flags: MessageFlags.Ephemeral });
+    }
+    await interaction.deferReply();
     const roster = await snapshot(interaction.guild);
     const state = { roster, guildId: interaction.guildId, view: "home", page: 0, selected: null };
     const nonce = interaction.id;
     const response = await interaction.editReply(viewPayload(state, nonce));
     const collector = response.createMessageComponentCollector({ time: 10 * 60 * 1000 });
     collector.on("collect", async (button) => {
-      if (button.user.id !== interaction.user.id || !authorized(button)) {
-        return button.reply({ content: "Cette interface est réservée à son auteur et au staff.", flags: MessageFlags.Ephemeral });
+      if (!authorized(button)) {
+        return button.reply({ content: "Cette interface est réservée au staff.", flags: MessageFlags.Ephemeral });
       }
       const action = button.customId.split(":")[2];
       try {
+        if (action === "weeklyReport") {
+          const { getGuildConfig } = require("../core/guildConfig");
+          const { reportForGuild } = require("../core/weeklyRoster");
+          const cfg = getGuildConfig(interaction.guildId);
+          const channelId = cfg?.automations?.rapportEffectif?.channelId || cfg?.staffReportsChannelId;
+          if (!channelId) return button.reply({ content: "Configure le salon du rapport dans /setup.", flags: MessageFlags.Ephemeral });
+          await button.deferReply({ flags: MessageFlags.Ephemeral });
+          try {
+            const result = await reportForGuild(interaction.guild, channelId);
+            return button.editReply(`Rapport publié dans <#${result.channelId}> pour ${result.players} joueurs.`);
+          } catch (err) {
+            return button.editReply(`Rapport non publié : ${err.message}`);
+          }
+        }
+        if (action === "refresh") state.roster = await snapshot(interaction.guild);
         if (action === "select") {
           state.selected = button.values[0];
           state.view = "profile";
@@ -128,7 +153,7 @@ module.exports = {
           });
           try {
             const decision = await confirmation.awaitMessageComponent({
-              filter: i => i.user.id === interaction.user.id && i.customId.startsWith(`prime3:${nonce}:`),
+              filter: i => i.user.id === button.user.id && i.customId.startsWith(`prime3:${nonce}:`),
               time: 30000,
             });
             if (decision.customId.endsWith(":cancel")) return decision.update({ content: "Action annulée.", components: [] });
