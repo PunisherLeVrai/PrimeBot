@@ -1,3 +1,4 @@
+const { requireStaffChannel } = require("../core/staffVisibility");
 const { embed } = require("../core/primeTheme");
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 const { authorized, reject, team, teams } = require("../core/staffTools");
@@ -10,7 +11,8 @@ module.exports = {
     try {
       const cfg=getGuildConfig(interaction.guildId);
       const lines=teams(interaction.guildId).map(t=>`${t.nom} (${t.id}) : salon <#${t.disposChannelId}>, rapports <#${t.reportChannelId}>, rôles ${(t.playerRoleIds||[]).length}, messages ${(t.dispoMessageIds||[]).filter(Boolean).length}/7`);
-      return interaction.reply({embeds: [embed("CONFIGURATION  |  Vue générale", `**Automations globales :** ${cfg.automations.enabled ? "Activées" : "Désactivées"}\n**Équipes :** ${lines.length}\n\n${lines.join("\n") || "Aucune équipe configurée."}`)], flags: MessageFlags.Ephemeral});
+      if (!await requireStaffChannel(interaction)) return;
+      return interaction.reply({embeds: [embed("CONFIGURATION  |  Vue générale", `**Automations globales :** ${cfg.automations.enabled ? "Activées" : "Désactivées"}\n**Équipes :** ${lines.length}\n\n${lines.join("\n") || "Aucune équipe configurée."}`)]});
     } catch (error) {
       console.error("[PRIME][CONFIG]", error);
       const payload = { content: "Erreur pendant l'exécution.", flags: MessageFlags.Ephemeral };
