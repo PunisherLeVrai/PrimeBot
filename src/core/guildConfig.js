@@ -51,6 +51,7 @@ const DEFAULT_GUILD = {
     },
 
     derniereChance: { enabled: false, minutesBefore: 30 },
+    rapportEffectif: { enabled: false, day: 0, time: "20:00", channelId: null, lastSentKey: null },
 
     avertissement: {
       enabled: false,
@@ -292,6 +293,14 @@ function normalizeAutomations(input) {
     rappel: {
       enabled: rappelEnabled,
       times: rappelTimes,
+    },
+
+    rapportEffectif: {
+      enabled: toBool(source.rapportEffectif?.enabled, false),
+      day: clampInt(source.rapportEffectif?.day, { min: 0, max: 6, fallback: 0 }),
+      time: normalizeTimeStr(source.rapportEffectif?.time) || "20:00",
+      channelId: normalizeOptionalId(source.rapportEffectif?.channelId),
+      lastSentKey: /^\d{4}-W\d{2}$/.test(String(source.rapportEffectif?.lastSentKey || "")) ? source.rapportEffectif.lastSentKey : null,
     },
 
     derniereChance: {
@@ -555,6 +564,11 @@ function upsertGuildConfig(guildId, patch) {
     rappel: {
       ...(current.automations.rappel || {}),
       ...(source.automations?.rappel || {}),
+    },
+
+    rapportEffectif: {
+      ...(current.automations.rapportEffectif || {}),
+      ...(source.automations?.rapportEffectif || {}),
     },
 
     derniereChance: {
