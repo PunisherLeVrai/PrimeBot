@@ -1,3 +1,4 @@
+const { requireStaffChannel } = require("../core/staffVisibility");
 const { embed } = require("../core/primeTheme");
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 const { authorized, reject, team, teams } = require("../core/staffTools");
@@ -27,7 +28,8 @@ module.exports = {
       }
       const lines=[...scores].sort((a,b)=>(b[1].yes+b[1].no)/(b[1].yes+b[1].no+b[1].missing)-(a[1].yes+a[1].no)/(a[1].yes+a[1].no+a[1].missing))
         .slice(0,30).map(([id,s])=>{const n=s.yes+s.no+s.missing;return `<@${id}> : ${Math.round(100*(s.yes+s.no)/n)}% | Présent ${s.yes} | Absent ${s.no} | Oubli ${s.missing}`;});
-      return interaction.reply({embeds: [embed("STATISTIQUES  |  Disponibilités", `**Période :** ${days} jours\n**Journées / équipes archivées :** ${records}\n\n${lines.join("\n") || "Aucune donnée."}`)], flags: MessageFlags.Ephemeral});
+      if (!await requireStaffChannel(interaction)) return;
+      return interaction.reply({embeds: [embed("STATISTIQUES  |  Disponibilités", `**Période :** ${days} jours\n**Journées / équipes archivées :** ${records}\n\n${lines.join("\n") || "Aucune donnée."}`)]});
     } catch (error) {
       console.error("[PRIME][STATS_DISPO]", error);
       const payload = { content: "Erreur pendant l'exécution.", flags: MessageFlags.Ephemeral };
