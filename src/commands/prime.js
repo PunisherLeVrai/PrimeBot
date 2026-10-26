@@ -12,6 +12,7 @@ const { teams } = require("../core/staffTools");
 const { PermissionsBitField } = require("discord.js");
 const { getUserPseudos } = require("../core/pseudoStore");
 const { DAYS, systems, getSystem, missingPlayers, sendReminder } = require("../core/primeReminder");
+const { liveStatus, mentionList, sendLiveReminder } = require("../core/primeLive");
 
 function menu(view, page, playerId, nonce) {
   const id = (action) => `prime3:${nonce}:${action}`;
@@ -29,7 +30,9 @@ function menu(view, page, playerId, nonce) {
   const report = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(id("weeklyReport")).setLabel("Publier rapport hebdo").setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(id("refresh")).setLabel("Actualiser").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(id("reminder")).setLabel("Rappel disponibilités").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(id("reminder")).setLabel("Rappels").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(id("liveReport")).setLabel("Rapport en direct").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(id("pseudos")).setLabel("Pseudos").setStyle(ButtonStyle.Secondary),
   );
   return [nav, actions, report];
 }
@@ -54,6 +57,18 @@ function viewPayload(state, nonce) {
       const count = players.filter((p) => p.teamIds.includes(t.id)).length;
       return `**${safe(t.nom || t.name || t.id, 60)}**  —  ${count} joueur(s)`;
     }).join("\n") || "Aucune équipe configurée.");
+  } else if (view === "reports") {
+    const history = require("../core/dispoHistory").getGuild(state.guildId);
+    const date = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Paris" });
+    const lines = Object.entries(history).map(([name, days]) => {
+      const d = days[date];
+      return `**${safe(name, 65)}** : ${d ? `${d.yes?.length || 0} présents · ${d.no?.length || 0} absents · ${d.missing?.length || 0} sans réponse` : "Pas encore archivé aujourd’hui"}`;
+    });
+    card = embed("RAPPORTS  •  Centre de suivi", `**Synthèse du ${date}**\n${lines.join("\n") || "Aucune archive disponible."}\n\n**Publier rapport hebdo** : classement complet par poste.\n**Rappels** : relancer uniquement les joueurs sans réponse.`);
+  } else if (view === "pseudos") {
+    const { getGuildConfig } = require("../core/guildConfig");
+    const cfg = getGuildConfig(state.guildId);
+    card = embed("PSEUDOS  •  Synchronisation", `**Salon de saisie :** ${cfg?.pseudoScanChannelId ? `<#${cfg.pseudoScanChannelId}>` : "Non configuré"}\n\nLe scan récupère les pseudos enregistrés et actualise les surnoms des joueurs.\n\n**Attention :** cette opération modifie les surnoms Discord. Une confirmation est obligatoire.`);
   } else if (view === "issues") {
     const noPost = players.filter((p) => !p.posts.length);
     const noPseudo = players.filter((p) => !getUserPseudos(state.guildId, p.id)?.pseudo);
@@ -83,6 +98,11 @@ function viewPayload(state, nonce) {
     components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
       .setCustomId(`prime3:${nonce}:select`).setPlaceholder("Sélectionner un joueur (25 premiers)")
       .addOptions(choices)));
+  }
+  if (view === "pseudos") {
+    components.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`prime3:${nonce}:runPseudos`).setLabel("Synchroniser les pseudos").setStyle(ButtonStyle.Primary)
+    ));
   }
   if (view === "discipline" && playerId) {
     components.push(new ActionRowBuilder().addComponents(
@@ -114,6 +134,78 @@ module.exports = {
       }
       const action = button.customId.split(":")[2];
       try {
+        if (action === "liveReport" || action === "reminder") {
+          const reportMode = action === "liveReport";
+          const choices = systems(interaction.guildId).slice(0,25).map((s,i) => ({
+            label: ((i === 0 ? "Par défaut · " : "") + (s.nom || s.id)).slice(0,100), value: String(s.id),
+          }));
+          if (!choices.length) return button.reply({ content: "Aucune équipe configurée dans /setup.", flags: MessageFlags.Ephemeral });
+          const prefix = `primeLive:${button.id}`;
+          const panel = await button.reply({
+            content: `**PRIME · ${reportMode ? "Rapport en direct" : "Rappel en direct"}**\nChoisis l'équipe à contrôler.`,
+            components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
+              .setCustomId(`${prefix}:system`).setPlaceholder("Choisir une équipe").addOptions(choices))],
+            flags: MessageFlags.Ephemeral, fetchReply: true,
+          });
+          try {
+            const selected = await panel.awaitMessageComponent({ filter: i => i.user.id === button.user.id && i.customId === `${prefix}:system`, time: 60000 });
+            const team = getSystem(interaction.guildId, selected.values[0]);
+            if (!team) throw new Error("Équipe introuvable.");
+            await selected.update({ content: `**${team.nom || team.id}** · Choisis le jour.`,
+              components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
+                .setCustomId(`${prefix}:day`).setPlaceholder("Jour de la semaine")
+                .addOptions(DAYS.map((label, value) => ({ label, value: String(value) }))))] });
+            const daySelection = await panel.awaitMessageComponent({ filter: i => i.user.id === button.user.id && i.customId === `${prefix}:day`, time: 60000 });
+            const day = Number(daySelection.values[0]);
+            await daySelection.deferUpdate();
+            let delivery = 'salon';
+            if (!reportMode) {
+              await daySelection.editReply({ content: `**${team.nom || team.id} · ${DAYS[day]}**\nChoisis le canal d'envoi.`,
+                components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
+                  .setCustomId(`${prefix}:delivery`).setPlaceholder("Mode d'envoi").addOptions([
+                    { label: "Salon de disponibilités", value: "salon" },
+                    { label: "Messages privés", value: "mp" },
+                    { label: "Salon et messages privés", value: "both" },
+                  ]))] });
+              const selectedDelivery = await panel.awaitMessageComponent({ filter: i => i.user.id === button.user.id && i.customId === `${prefix}:delivery`, time: 60000 });
+              delivery = selectedDelivery.values[0];
+              await selectedDelivery.deferUpdate();
+            }
+            const render = async () => {
+              const result = await liveStatus(interaction.guild, team, day);
+              const body = `**${team.nom || team.id} · ${DAYS[day]}**\n**Joueurs :** ${result.total}\n**Présents :** ${result.yes.length}\n**Absents :** ${result.no.length}\n**Sans réponse :** ${result.missing.length}\n**Réactions contradictoires :** ${result.conflicting.length}\n\n**Présents**\n${mentionList(result.yes)}\n\n**Absents**\n${mentionList(result.no)}\n\n**Sans réponse**\n${mentionList(result.missing)}${result.conflicting.length ? `\n\n**À vérifier (✅ et ❌)**\n${mentionList(result.conflicting)}` : ''}\n\n[Message de disponibilités](https://discord.com/channels/${interaction.guildId}/${result.channel.id}/${result.message.id})`;
+              return { result, body };
+            };
+            let { result, body } = await render();
+            const controls = () => [new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`${prefix}:refresh`).setLabel("Actualiser").setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`${prefix}:confirm`).setLabel("Envoyer le rappel").setStyle(ButtonStyle.Danger).setDisabled(reportMode || !result.missing.length),
+              new ButtonBuilder().setCustomId(`${prefix}:close`).setLabel("Fermer").setStyle(ButtonStyle.Secondary),
+            )];
+            await daySelection.editReply({ content: `**PRIME · ${reportMode ? "Rapport en direct" : `Rappel en direct (${delivery})`}**\n${body}`, components: controls(), allowedMentions: { parse: [] } });
+            for (let attempt = 0; attempt < 12; attempt++) {
+              const next = await panel.awaitMessageComponent({ filter: i => i.user.id === button.user.id && i.customId.startsWith(`${prefix}:`), time: 120000 });
+              if (next.customId.endsWith(':close')) { await next.update({ content: 'Panneau fermé.', components: [] }); break; }
+              await next.deferUpdate();
+              if (next.customId.endsWith(':refresh')) {
+                ({ result, body } = await render());
+                await next.editReply({ content: `**PRIME · ${reportMode ? "Rapport en direct" : "Rappel en direct"} · Actualisé**\n${body}`, components: controls(), allowedMentions: { parse: [] } });
+                continue;
+              }
+              if (!reportMode && next.customId.endsWith(':confirm')) {
+                const fresh = await liveStatus(interaction.guild, team, day);
+                const sent = await sendLiveReminder(fresh, delivery);
+                log(interaction.guildId, button.user.id, 'reminder.live', team.id, { day, delivery, sent: sent.sent, failed: sent.failed });
+                await next.editReply({ content: `**Rappel terminé**\nÉquipe : ${team.nom || team.id}\nJour : ${DAYS[day]}\nEnvois : ${sent.sent}\nÉchecs MP : ${sent.failed}\nSans réponse au dernier contrôle : ${fresh.missing.length}`, components: [] });
+                break;
+              }
+            }
+          } catch (error) {
+            console.error('[PRIME][LIVE]', error);
+            await button.editReply({ content: `Opération interrompue : ${safe(error.message, 300)}`, components: [] }).catch(() => {});
+          }
+          return;
+        }
         if (action === "reminder") {
           const options = systems(interaction.guildId).slice(0, 25).map((s, i) => ({
             label: (i === 0 ? "Par défaut · " : "") + (s.nom || s.id),
@@ -163,6 +255,39 @@ module.exports = {
           } catch (error) {
             console.error('[PRIME][RAPPEL]', error);
             return button.editReply({ content: `Rappel non envoyé : ${error.message === 'Collector received no interactions before ending with reason: time' ? 'délai dépassé' : error.message}`, components: [] }).catch(() => {});
+          }
+        }
+        if (action === "pseudos") {
+          state.view = "pseudos";
+          return button.update(viewPayload(state, nonce));
+        }
+        if (action === "reports") {
+          state.view = "reports";
+          return button.update(viewPayload(state, nonce));
+        }
+        if (action === "runPseudos") {
+          const { getGuildConfig } = require("../core/guildConfig");
+          const cfg = getGuildConfig(interaction.guildId);
+          if (!cfg?.pseudoScanChannelId) return button.reply({ content: "Configure d’abord le salon des pseudos dans /setup.", flags: MessageFlags.Ephemeral });
+          const prompt = await button.reply({
+            content: "**Confirmer la synchronisation des pseudos ?**\nLes surnoms des membres pourront être modifiés.",
+            components: [new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`primePseudo:${nonce}:confirm`).setLabel("Lancer le scan").setStyle(ButtonStyle.Danger),
+              new ButtonBuilder().setCustomId(`primePseudo:${nonce}:cancel`).setLabel("Annuler").setStyle(ButtonStyle.Secondary)
+            )], flags: MessageFlags.Ephemeral, fetchReply: true,
+          });
+          try {
+            const decision = await prompt.awaitMessageComponent({ filter: i => i.user.id === button.user.id && i.customId.startsWith(`primePseudo:${nonce}:`), time: 60000 });
+            if (decision.customId.endsWith(":cancel")) return decision.update({ content: "Synchronisation annulée.", components: [] });
+            await decision.update({ content: "Synchronisation en cours…", components: [] });
+            const { runPseudoForGuild } = require("../automations/runner");
+            const result = await runPseudoForGuild(interaction.guild, cfg, { scanLimit: 300, throttleMs: 850, requirePseudoChannel: true });
+            if (!result.ok) throw new Error(`Scan impossible : ${result.reason}`);
+            log(interaction.guildId, button.user.id, "pseudo.sync", "guild", { changed: result.okCount, failed: result.fail });
+            return decision.editReply({ content: `**Synchronisation terminée**\nMessages scannés : ${result.scannedMessages}\nPseudos trouvés : ${result.pseudosFound}\nSurnoms modifiés : ${result.okCount}\nInchangés : ${result.skipped}\nÉchecs : ${result.fail}`, components: [] });
+          } catch (error) {
+            console.error("[PRIME][PSEUDOS]", error);
+            return button.editReply({ content: `Synchronisation non terminée : ${safe(error.message, 300)}`, components: [] }).catch(() => {});
           }
         }
         if (action === "weeklyReport") {
